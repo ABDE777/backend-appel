@@ -554,6 +554,84 @@ router.post('/settings', authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
+// POST /agents/import — Import en masse depuis CSV/Excel (admin seulement)
+// Body: { names: ["alice","bob",...], role: "agent"|"admin" }
+router.post('/agents/import', authenticateToken, requireAdmin, async (req, res) => {
+  const names = req.body?.names;
+  const role = req.body?.role === 'admin' ? 'admin' : 'agent';
+  if (!Array.isArray(names) || names.length === 0) {
+    return res.status(400).json({ error: 'Liste de noms requise' });
+  }
+
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  const results = [];
+  const mustChangeNames = [];
+
+  for (let i = 0; i < names.length; i++) {
+    const name = sanitizeText(String(names[i]).trim(), 80);
+    if (!name) continue;
+    const id = String(i + 1).padStart(3, '0');
+    const plainPassword = `${name.toLowerCase()}${id}${hh}${mm}`;
+    const hashed = bcrypt.hashSync(plainPassword, 12);
+    const table = role === 'admin' ? 'admins' : 'agents';
+    try {
+      const { error } = await supabase.from(table).upsert({ name, password: hashed }, { onConflict: 'name' });
+      if (!error) {
+        results.push({ name, password: plainPassword, role });
+        mustChangeNames.push(name);
+      }
+    } catch (e) {
+      console.error(`[import] ${name}:`, e.message);
+    }
+  }
+
+  // Stocker la liste must_change_password dans settings
+  try {
+    const { data: existing } = await supabase.from('settings').select('value').eq('key', 'must_change_password').maybeSingle();
+    const existingList = existing ? JSON.parse(existing.value || '[]') : [];
+    const merged = [...new Set([...existingList, ...mustChangeNames])];
+    await supabase.from('settings').upsert({ key: 'must_change_password', value: JSON.stringify(merged) }, { onConflict: 'key' });
+  } catch (e) {}
+
+  return res.json({ success: true, created: results });
+});
+
+// GET /user/must-change — Vérifier si l'utilisateur connecté doit changer son mot de passe
+router.get('/user/must-change', authenticateToken, async (req, res) => {
+  try {
+    const { data } = await supabase.from('settings').select('value').eq('key', 'must_change_password').maybeSingle();
+    const list = data ? JSON.parse(data.value || '[]') : [];
+    return res.json({ mustChange: list.includes(req.user.name) });
+  } catch (err) {
+    return res.json({ mustChange: false });
+  }
+});
+
+// POST /user/change-password — Changer son propre mot de passe
+router.post('/user/change-password', authenticateToken, async (req, res) => {
+  const password = typeof req.body?.password === 'string' ? req.body.password.slice(0, 128) : null;
+  if (!password || password.trim().length < 4) {
+    return res.status(400).json({ error: 'Mot de passe trop court (minimum 4 caractères)' });
+  }
+  const hashed = bcrypt.hashSync(password, 12);
+  const table = req.user.role === 'admin' ? 'admins' : 'agents';
+  try {
+    const { error } = await supabase.from(table).update({ password: hashed }).eq('name', req.user.name);
+    if (error) throw error;
+    // Retirer de la liste must_change
+    const { data } = await supabase.from('settings').select('value').eq('key', 'must_change_password').maybeSingle();
+    if (data) {
+      const list = JSON.parse(data.value || '[]').filter(n => n !== req.user.name);
+      await supabase.from('settings').upsert({ key: 'must_change_password', value: JSON.stringify(list) }, { onConflict: 'key' });
+    }
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── 404 catch-all ────────────────────────────────────────────────────────────
 router.use((req, res) => {
   res.status(404).json({ error: `Route introuvable : ${req.method} ${req.path}` });
