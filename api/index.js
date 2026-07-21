@@ -381,6 +381,34 @@ router.delete('/agents/:name', authenticateToken, requireAdmin, async (req, res)
   }
 });
 
+// PUT /agents/:name — Modifier un agent (mot de passe et/ou nom) (admin seulement)
+router.put('/agents/:name', authenticateToken, requireAdmin, async (req, res) => {
+  const oldName = decodeURIComponent(req.params.name);
+  const newName = sanitizeText(req.body?.name, 80) || oldName;
+  const password = typeof req.body?.password === 'string' ? req.body.password.slice(0, 128) : null;
+
+  try {
+    const updateData = {};
+    if (newName && newName !== oldName) updateData.name = newName;
+    if (password && password.trim() !== "") updateData.password = bcrypt.hashSync(password, 12);
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({ error: 'Aucune modification transmise' });
+    }
+
+    const { error } = await supabase
+      .from('agents')
+      .update(updateData)
+      .eq('name', oldName);
+
+    if (error) throw error;
+    return res.json({ success: true, name: newName });
+  } catch (err) {
+    console.error('[PUT /agents/:name]', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /admins — Liste des admins (admin seulement, sans mots de passe)
 router.get('/admins', authenticateToken, requireAdmin, async (req, res) => {
   try {
@@ -426,6 +454,34 @@ router.delete('/admins/:name', authenticateToken, requireAdmin, async (req, res)
     if (error) throw error;
     return res.json({ success: true });
   } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /admins/:name — Modifier un admin (mot de passe et/ou nom) (admin seulement)
+router.put('/admins/:name', authenticateToken, requireAdmin, async (req, res) => {
+  const oldName = decodeURIComponent(req.params.name);
+  const newName = sanitizeText(req.body?.name, 80) || oldName;
+  const password = typeof req.body?.password === 'string' ? req.body.password.slice(0, 128) : null;
+
+  try {
+    const updateData = {};
+    if (newName && newName !== oldName) updateData.name = newName;
+    if (password && password.trim() !== "") updateData.password = bcrypt.hashSync(password, 12);
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({ error: 'Aucune modification transmise' });
+    }
+
+    const { error } = await supabase
+      .from('admins')
+      .update(updateData)
+      .eq('name', oldName);
+
+    if (error) throw error;
+    return res.json({ success: true, name: newName });
+  } catch (err) {
+    console.error('[PUT /admins/:name]', err.message);
     return res.status(500).json({ error: err.message });
   }
 });
