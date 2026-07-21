@@ -7,8 +7,13 @@ app.use(cors());
 app.use(express.json());
 
 // Connection String PostgreSQL Supabase & mot de passe admin
-const DATABASE_URL = process.env.DATABASE_URL || "postgresql://postgres:0680202702na@db.sbkhugfureiuuaegoxtx.supabase.co:5432/postgres";
+// NOTE: Use port 6543 (pooler) for serverless environments like Vercel
+const DATABASE_URL = process.env.DATABASE_URL;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Sinistre2026";
+
+if (!DATABASE_URL) {
+  console.error("CRITICAL: DATABASE_URL environment variable is not set!");
+}
 
 // Initialisation du pool de connexions PostgreSQL
 let pool = null;
@@ -17,9 +22,12 @@ if (DATABASE_URL) {
     pool = new Pool({
       connectionString: DATABASE_URL,
       ssl: { rejectUnauthorized: false },
-      max: 10,
-      idleTimeoutMillis: 30000,
+      max: 3,                    // Keep low for serverless
+      idleTimeoutMillis: 10000,
       connectionTimeoutMillis: 10000
+    });
+    pool.on('error', (err) => {
+      console.error('PostgreSQL pool error:', err.message);
     });
   } catch (err) {
     console.error("Erreur d'initialisation du Pool PostgreSQL:", err);
@@ -81,7 +89,7 @@ router.post('/auth/agent', async (req, res) => {
 
 // GET /entries - Récupération des codifications
 router.get('/entries', async (req, res) => {
-  if (!pool) return res.json([]);
+  if (!pool) return res.status(500).json({ error: "Base de données non connectée. Vérifiez DATABASE_URL sur Vercel." });
   try {
     const result = await pool.query('SELECT * FROM public.entries ORDER BY ts DESC');
     const formatted = result.rows.map(e => ({
@@ -144,7 +152,7 @@ router.post('/entries', async (req, res) => {
 
 // GET /agents - Liste des conseillers
 router.get('/agents', async (req, res) => {
-  if (!pool) return res.json([]);
+  if (!pool) return res.status(500).json({ error: "Base de données non connectée. Vérifiez DATABASE_URL sur Vercel." });
   try {
     const result = await pool.query('SELECT name, password FROM public.agents ORDER BY name ASC');
     return res.json(result.rows);
