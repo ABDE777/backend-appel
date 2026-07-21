@@ -402,6 +402,15 @@ router.put('/agents/:name', authenticateToken, requireAdmin, async (req, res) =>
       .eq('name', oldName);
 
     if (error) throw error;
+
+    // Si le nom a changé, mettre à jour toutes les entrées enregistrées par cet agent
+    if (newName && newName !== oldName) {
+      await supabase
+        .from('entries')
+        .update({ agent: newName })
+        .eq('agent', oldName);
+    }
+
     return res.json({ success: true, name: newName });
   } catch (err) {
     console.error('[PUT /agents/:name]', err.message);
@@ -479,6 +488,15 @@ router.put('/admins/:name', authenticateToken, requireAdmin, async (req, res) =>
       .eq('name', oldName);
 
     if (error) throw error;
+
+    // Si le nom a changé, mettre à jour toutes les entrées enregistrées par cet admin
+    if (newName && newName !== oldName) {
+      await supabase
+        .from('entries')
+        .update({ agent: newName })
+        .eq('agent', oldName);
+    }
+
     return res.json({ success: true, name: newName });
   } catch (err) {
     console.error('[PUT /admins/:name]', err.message);
