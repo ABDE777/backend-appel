@@ -1,7 +1,7 @@
 {
   "name": "registre-des-appels",
   "version": "1.0.0",
-  "description": "Registre des appels sinistre auto - Express API Netlify + Supabase JS",
+  "description": "Registre des appels sinistre auto - Express API Vercel + Supabase JS",
   "main": "api/index.js",
   "scripts": {
     "start": "node api/index.js"
@@ -9,8 +9,6 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
     "cors": "^2.8.5",
-    "express": "^4.18.3",
-    "serverless-http": "^3.2.0"
+    "express": "^4.18.3"
   }
 }
-
