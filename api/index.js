@@ -31,28 +31,11 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
 // ─── App setup ────────────────────────────────────────────────────────────────
 const app = express();
 
-// CORS — autorise localhost en dev, domaine Netlify en prod
-const allowedOrigins = [
-  'http://localhost:5000',
-  'http://localhost:3000',
-  'http://127.0.0.1:5000',
-];
-// En prod, Netlify ajoute l'URL du déploiement (ex: https://xxx.netlify.app)
-if (process.env.FRONTEND_URL) {
-  allowedOrigins.push(process.env.FRONTEND_URL);
-}
-
+// CORS — autorise toutes les origines (Netlify, Vercel, localhost)
 app.use(cors({
-  origin: function (origin, callback) {
-    // Autoriser les requêtes sans origin (Postman, serveurs) et les origins connues
-    if (!origin || allowedOrigins.includes(origin) || NODE_ENV === 'development') {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
+  origin: true,
   credentials: true,
-  methods: ['GET', 'POST', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
