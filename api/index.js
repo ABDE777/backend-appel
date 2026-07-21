@@ -303,6 +303,41 @@ router.post('/entries', authenticateToken, async (req, res) => {
   }
 });
 
+// PUT /entries/:id — Modifier un appel codifié (authentifié)
+router.put('/entries/:id', authenticateToken, async (req, res) => {
+  const id = req.params.id;
+  const body = req.body;
+  if (!id) return res.status(400).json({ error: 'ID requis' });
+
+  try {
+    const { data: existing, error: getErr } = await supabase
+      .from('entries')
+      .select('agent')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (getErr) throw getErr;
+    if (!existing) return res.status(404).json({ error: 'Appel non trouvé' });
+
+    if (req.user.role === 'agent' && existing.agent !== req.user.name) {
+      return res.status(403).json({ error: 'Vous ne pouvez modifier que vos propres codifications' });
+    }
+
+    const updateData = {};
+    if (body.ref !== undefined) updateData.ref = sanitizeText(body.ref, 20) || '';
+    if (body.motifId) updateData.motif_id = sanitizeText(body.motifId, 60);
+    if (body.callerType !== undefined) updateData.caller_type = ['client', 'agent'].includes(body.callerType) ? body.callerType : null;
+    if (body.comment !== undefined) updateData.comment = sanitizeText(body.comment, 500);
+
+    const { error } = await supabase.from('entries').update(updateData).eq('id', id);
+    if (error) throw error;
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('[PUT /entries/:id]', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /entries/batch — Import en masse (admin seulement)
 router.post('/entries/batch', authenticateToken, requireAdmin, async (req, res) => {
   const { entries } = req.body;
