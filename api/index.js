@@ -1,198 +1,454 @@
+'use strict';
+
 const express = require('express');
 const cors = require('cors');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 const { createClient } = require('@supabase/supabase-js');
 
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-// Clés Supabase (à configurer dans Vercel Environment Variables)
+// ─── Environment ─────────────────────────────────────────────────────────────
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Sinistre2026";
+const JWT_SECRET = process.env.JWT_SECRET;
+const NODE_ENV = process.env.NODE_ENV || 'development';
+const PORT = process.env.PORT || 3000;
 
+// Fail fast if critical env vars are missing
 if (!SUPABASE_URL || !SUPABASE_SECRET_KEY) {
-  console.error("CRITICAL: SUPABASE_URL ou SUPABASE_SECRET_KEY non configuré !");
+  console.error('[FATAL] SUPABASE_URL ou SUPABASE_SECRET_KEY manquant dans .env');
+  process.exit(1);
+}
+if (!JWT_SECRET) {
+  console.error('[FATAL] JWT_SECRET manquant dans .env');
+  process.exit(1);
 }
 
-// Initialisation du client Supabase (service role = accès complet)
-let supabase = null;
-if (SUPABASE_URL && SUPABASE_SECRET_KEY) {
-  supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
-    auth: { persistSession: false }
-  });
+// ─── Supabase client (service role — ne jamais exposer côté client) ───────────
+const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false }
+});
+
+// ─── App setup ────────────────────────────────────────────────────────────────
+const app = express();
+
+// CORS — autorise localhost en dev, domaine Netlify en prod
+const allowedOrigins = [
+  'http://localhost:5000',
+  'http://localhost:3000',
+  'http://127.0.0.1:5000',
+];
+// En prod, Netlify ajoute l'URL du déploiement (ex: https://xxx.netlify.app)
+if (process.env.FRONTEND_URL) {
+  allowedOrigins.push(process.env.FRONTEND_URL);
 }
 
-// Routeur principal
+app.use(cors({
+  origin: function (origin, callback) {
+    // Autoriser les requêtes sans origin (Postman, serveurs) et les origins connues
+    if (!origin || allowedOrigins.includes(origin) || NODE_ENV === 'development') {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
+
+app.use(express.json({ limit: '1mb' }));
+
+// ─── Simple in-memory rate limiter (pas de dépendance externe) ────────────────
+const rateLimitStore = new Map();
+function rateLimit({ windowMs = 60_000, max = 20 } = {}) {
+  return (req, res, next) => {
+    const key = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+    const now = Date.now();
+    const record = rateLimitStore.get(key) || { count: 0, resetAt: now + windowMs };
+
+    if (now > record.resetAt) {
+      record.count = 0;
+      record.resetAt = now + windowMs;
+    }
+    record.count++;
+    rateLimitStore.set(key, record);
+
+    res.setHeader('X-RateLimit-Limit', max);
+    res.setHeader('X-RateLimit-Remaining', Math.max(0, max - record.count));
+
+    if (record.count > max) {
+      return res.status(429).json({ error: 'Trop de requêtes. Réessayez dans quelques instants.' });
+    }
+    next();
+  };
+}
+
+// Nettoyage périodique du store (évite les fuites mémoire sur Vercel serverless)
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, val] of rateLimitStore) {
+    if (now > val.resetAt) rateLimitStore.delete(key);
+  }
+}, 60_000);
+
+// ─── Security headers ─────────────────────────────────────────────────────────
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  // Pas de cache sur les routes d'API sensibles
+  if (req.path.startsWith('/api/')) {
+    res.setHeader('Cache-Control', 'no-store');
+  }
+  next();
+});
+
+// ─── JWT helpers ──────────────────────────────────────────────────────────────
+function generateToken(payload) {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: '8h', algorithm: 'HS256' });
+}
+
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.startsWith('Bearer ') && authHeader.slice(7);
+  if (!token) return res.status(401).json({ error: 'Authentification requise' });
+
+  try {
+    req.user = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
+    next();
+  } catch (err) {
+    const msg = err.name === 'TokenExpiredError' ? 'Session expirée' : 'Token invalide';
+    return res.status(403).json({ error: msg });
+  }
+}
+
+function requireAdmin(req, res, next) {
+  if (req.user?.role === 'admin') return next();
+  return res.status(403).json({ error: 'Accès réservé aux administrateurs' });
+}
+
+// ─── Input sanitizers ─────────────────────────────────────────────────────────
+function sanitizeText(val, maxLen = 100) {
+  if (typeof val !== 'string') return null;
+  return val.trim().slice(0, maxLen) || null;
+}
+
+// ─── Auth helpers ─────────────────────────────────────────────────────────────
+async function verifyPassword(plain, stored) {
+  if (!plain || !stored) return false;
+  // Mot de passe haché bcrypt
+  if (stored.startsWith('$2a$') || stored.startsWith('$2b$')) {
+    return bcrypt.compareSync(plain, stored);
+  }
+  // Mot de passe en clair — vérifier puis upgrader vers bcrypt
+  return plain === stored;
+}
+
+async function upgradePasswordIfNeeded(table, name, plainPassword, storedHash) {
+  if (!storedHash.startsWith('$2a$') && !storedHash.startsWith('$2b$')) {
+    const hashed = bcrypt.hashSync(plainPassword, 12);
+    await supabase.from(table).update({ password: hashed }).eq('name', name);
+  }
+}
+
+// ─── Router ───────────────────────────────────────────────────────────────────
 const router = express.Router();
 
-// ─── GET /status ──────────────────────────────────────────────────────────────
+// GET /status — Health check (public)
 router.get('/status', async (req, res) => {
-  if (!supabase) {
-    return res.json({ status: 'online', dbConnected: false, message: 'SUPABASE_URL / SUPABASE_SECRET_KEY non configurées' });
-  }
   try {
     const { error } = await supabase.from('agents').select('name').limit(1);
     if (error) throw error;
-    return res.json({
-      status: 'online',
-      dbConnected: true,
-      driver: 'Supabase JS Client',
-      timestamp: new Date().toISOString()
-    });
+    return res.json({ status: 'online', dbConnected: true, ts: new Date().toISOString() });
   } catch (err) {
-    return res.json({
-      status: 'online',
-      dbConnected: false,
-      error: err.message,
-      timestamp: new Date().toISOString()
+    return res.json({ status: 'online', dbConnected: false, error: err.message, ts: new Date().toISOString() });
+  }
+});
+
+// GET /auth/users — Liste des noms pour le dropdown login (public, noms seulement)
+router.get('/auth/users', async (req, res) => {
+  try {
+    const [{ data: agentsData }, { data: adminsData }] = await Promise.all([
+      supabase.from('agents').select('name').order('name', { ascending: true }),
+      supabase.from('admins').select('name').order('name', { ascending: true }),
+    ]);
+
+    const users = [];
+    const seen = new Set();
+
+    (adminsData || []).forEach(a => {
+      if (!seen.has(a.name.toLowerCase())) {
+        seen.add(a.name.toLowerCase());
+        users.push({ name: a.name, role: 'admin' });
+      }
     });
+    (agentsData || []).forEach(a => {
+      if (!seen.has(a.name.toLowerCase())) {
+        seen.add(a.name.toLowerCase());
+        users.push({ name: a.name, role: 'agent' });
+      }
+    });
+
+    return res.json(users);
+  } catch (err) {
+    console.error('[GET /auth/users]', err.message);
+    return res.status(500).json({ error: 'Impossible de charger les utilisateurs' });
   }
 });
 
-// ─── Auth Admin ───────────────────────────────────────────────────────────────
-router.post('/auth/admin', (req, res) => {
-  const { password } = req.body;
-  if (password === ADMIN_PASSWORD) {
-    return res.json({ success: true });
-  }
-  return res.status(401).json({ success: false, message: "Mot de passe incorrect" });
-});
+// POST /auth/login — Connexion unifiée avec rate limit strict
+router.post('/auth/login', rateLimit({ windowMs: 60_000, max: 10 }), async (req, res) => {
+  const name = sanitizeText(req.body?.name, 80);
+  const password = typeof req.body?.password === 'string' ? req.body.password.slice(0, 128) : null;
 
-// ─── Auth Conseiller ──────────────────────────────────────────────────────────
-router.post('/auth/agent', async (req, res) => {
-  const { name, password } = req.body;
-  if (!name || !password) return res.status(400).json({ success: false, message: "Identifiants manquants" });
-  if (!supabase) return res.status(500).json({ error: "Base de données non connectée" });
+  if (!name || !password) {
+    return res.status(400).json({ success: false, message: 'Nom et mot de passe requis' });
+  }
 
   try {
-    const { data, error } = await supabase
-      .from('agents')
-      .select('name')
-      .eq('name', name)
-      .eq('password', password)
-      .single();
+    // 1. Chercher dans la table admins
+    const { data: adminRow, error: adminErr } = await supabase
+      .from('admins')
+      .select('name, password')
+      .ilike('name', name)   // insensible à la casse
+      .limit(1)
+      .maybeSingle();
 
-    if (error || !data) {
-      return res.status(401).json({ success: false, message: "Mot de passe incorrect" });
+    if (!adminErr && adminRow) {
+      const valid = await verifyPassword(password, adminRow.password);
+      if (valid) {
+        await upgradePasswordIfNeeded('admins', adminRow.name, password, adminRow.password);
+        const token = generateToken({ role: 'admin', name: adminRow.name });
+        return res.json({ success: true, name: adminRow.name, role: 'admin', token });
+      }
+      // Nom trouvé mais mauvais mot de passe → réponse immédiate (pas de fallback sur agents)
+      return res.status(401).json({ success: false, message: 'Mot de passe incorrect' });
     }
-    return res.json({ success: true, name: data.name });
+
+    // 2. Chercher dans la table agents
+    const { data: agentRow, error: agentErr } = await supabase
+      .from('agents')
+      .select('name, password')
+      .ilike('name', name)
+      .limit(1)
+      .maybeSingle();
+
+    if (!agentErr && agentRow) {
+      const valid = await verifyPassword(password, agentRow.password);
+      if (valid) {
+        await upgradePasswordIfNeeded('agents', agentRow.name, password, agentRow.password);
+        const token = generateToken({ role: 'agent', name: agentRow.name });
+        return res.json({ success: true, name: agentRow.name, role: 'agent', token });
+      }
+      return res.status(401).json({ success: false, message: 'Mot de passe incorrect' });
+    }
+
+    return res.status(401).json({ success: false, message: 'Utilisateur introuvable' });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error('[POST /auth/login]', err.message);
+    return res.status(500).json({ error: 'Erreur serveur lors de la connexion' });
   }
 });
 
-// ─── GET /entries ─────────────────────────────────────────────────────────────
-router.get('/entries', async (req, res) => {
-  if (!supabase) return res.status(500).json({ error: "Base de données non connectée. Vérifiez SUPABASE_URL et SUPABASE_SECRET_KEY sur Vercel." });
+// GET /entries — Lister tous les appels (authentifié)
+router.get('/entries', authenticateToken, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('entries')
-      .select('*')
-      .order('ts', { ascending: false });
+      .select('id, ref, motif_id, caller_type, comment, agent, date, time, ts')
+      .order('ts', { ascending: false })
+      .limit(5000);
 
     if (error) throw error;
 
-    const formatted = (data || []).map(e => ({
+    return res.json((data || []).map(e => ({
       id: e.id,
-      ref: e.ref || "",
+      ref: e.ref || '',
       motifId: e.motif_id,
       callerType: e.caller_type || null,
       comment: e.comment || null,
       agent: e.agent,
       date: e.date,
       time: e.time,
-      ts: e.ts ? new Date(e.ts).toISOString() : new Date().toISOString()
-    }));
-    return res.json(formatted);
+      ts: e.ts,
+    })));
   } catch (err) {
-    console.error("Erreur GET /entries:", err);
+    console.error('[GET /entries]', err.message);
     return res.status(500).json({ error: err.message });
   }
 });
 
-// ─── POST /entries ────────────────────────────────────────────────────────────
-router.post('/entries', async (req, res) => {
-  const entry = req.body;
-  if (!entry || !entry.motifId || !entry.agent) {
-    return res.status(400).json({ error: "Champs requis manquants (motifId, agent)" });
-  }
-  if (!supabase) return res.status(500).json({ error: "Base de données non connectée" });
+// POST /entries — Créer un appel (authentifié)
+router.post('/entries', authenticateToken, async (req, res) => {
+  const body = req.body;
 
-  const id = entry.id || Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  // Validation
+  const motifId = sanitizeText(body?.motifId, 60);
+  const agent = sanitizeText(body?.agent, 80);
+  if (!motifId || !agent) {
+    return res.status(400).json({ error: 'motifId et agent sont requis' });
+  }
+
+  // Sécurité : un agent ne peut soumettre que pour lui-même
+  if (req.user.role === 'agent' && agent !== req.user.name) {
+    return res.status(403).json({ error: 'Vous ne pouvez soumettre que pour votre propre compte' });
+  }
+
+  const id = sanitizeText(body.id, 32) || (Date.now().toString(36) + Math.random().toString(36).slice(2, 7));
+  const now = new Date();
+
   const row = {
     id,
-    ref: entry.ref || "",
-    motif_id: entry.motifId,
-    caller_type: entry.callerType || null,
-    comment: entry.comment || null,
-    agent: entry.agent,
-    date: entry.date,
-    time: entry.time,
-    ts: entry.ts || new Date().toISOString()
+    ref: sanitizeText(body.ref, 20) || '',
+    motif_id: motifId,
+    caller_type: ['client', 'agent'].includes(body.callerType) ? body.callerType : null,
+    comment: sanitizeText(body.comment, 500),
+    agent,
+    date: sanitizeText(body.date, 10) || now.toISOString().slice(0, 10),
+    time: sanitizeText(body.time, 5) || now.toTimeString().slice(0, 5),
+    ts: body.ts || now.toISOString(),
   };
 
   try {
     const { error } = await supabase.from('entries').upsert(row, { onConflict: 'id' });
     if (error) throw error;
-    return res.json({ success: true, entry: { id, ref: row.ref, motifId: row.motif_id, callerType: row.caller_type, comment: row.comment, agent: row.agent, date: row.date, time: row.time, ts: row.ts } });
+    return res.status(201).json({ success: true, entry: { ...row, motifId: row.motif_id, callerType: row.caller_type } });
   } catch (err) {
-    console.error("Erreur POST /entries:", err);
+    console.error('[POST /entries]', err.message);
     return res.status(500).json({ error: err.message });
   }
 });
 
-// ─── GET /agents ──────────────────────────────────────────────────────────────
-router.get('/agents', async (req, res) => {
-  if (!supabase) return res.status(500).json({ error: "Base de données non connectée. Vérifiez SUPABASE_URL et SUPABASE_SECRET_KEY sur Vercel." });
-  try {
-    const { data, error } = await supabase
-      .from('agents')
-      .select('name, password')
-      .order('name');
+// POST /entries/batch — Import en masse (admin seulement)
+router.post('/entries/batch', authenticateToken, requireAdmin, async (req, res) => {
+  const { entries } = req.body;
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return res.status(400).json({ error: "Tableau 'entries' requis et non vide" });
+  }
+  if (entries.length > 1000) {
+    return res.status(400).json({ error: 'Maximum 1000 entrées par batch' });
+  }
 
+  const now = new Date();
+  const rows = entries.map(e => ({
+    id: sanitizeText(e.id, 32) || (Date.now().toString(36) + Math.random().toString(36).slice(2, 7)),
+    ref: sanitizeText(e.ref, 20) || '',
+    motif_id: sanitizeText(e.motifId, 60),
+    caller_type: ['client', 'agent'].includes(e.callerType) ? e.callerType : null,
+    comment: sanitizeText(e.comment, 500),
+    agent: sanitizeText(e.agent, 80),
+    date: sanitizeText(e.date, 10) || now.toISOString().slice(0, 10),
+    time: sanitizeText(e.time, 5) || now.toTimeString().slice(0, 5),
+    ts: e.ts || now.toISOString(),
+  }));
+
+  try {
+    const { error } = await supabase.from('entries').upsert(rows, { onConflict: 'id' });
     if (error) throw error;
-    return res.json(data || []);
+    return res.json({ success: true, count: rows.length });
+  } catch (err) {
+    console.error('[POST /entries/batch]', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /agents — Liste des agents (admin seulement, sans mots de passe)
+router.get('/agents', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('agents').select('name').order('name');
+    if (error) throw error;
+    return res.json((data || []).map(a => ({ name: a.name, password: '********' })));
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
 });
 
-// ─── POST /agents ─────────────────────────────────────────────────────────────
-router.post('/agents', async (req, res) => {
-  const { agents } = req.body;
-  if (!Array.isArray(agents)) return res.status(400).json({ error: "Tableau 'agents' requis" });
-  if (!supabase) return res.status(500).json({ error: "Base de données non connectée" });
+// POST /agents — Créer un agent (admin seulement)
+router.post('/agents', authenticateToken, requireAdmin, async (req, res) => {
+  const name = sanitizeText(req.body?.name, 80);
+  const password = typeof req.body?.password === 'string' ? req.body.password.slice(0, 128) : null;
+
+  if (!name || !password) {
+    return res.status(400).json({ error: 'Nom et mot de passe requis' });
+  }
 
   try {
-    const names = agents.map(a => a.name);
+    const hashed = bcrypt.hashSync(password, 12);
+    const { error } = await supabase
+      .from('agents')
+      .upsert({ name, password: hashed }, { onConflict: 'name' });
+    if (error) throw error;
+    return res.status(201).json({ success: true, name });
+  } catch (err) {
+    console.error('[POST /agents]', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
-    if (names.length > 0) {
-      // Supprimer ceux qui ne sont plus dans la liste
-      const { error: delError } = await supabase
-        .from('agents')
-        .delete()
-        .not('name', 'in', `(${names.map(n => `"${n}"`).join(',')})`);
-      if (delError) throw delError;
-
-      // Upsert tous les agents
-      const { error: upsertError } = await supabase
-        .from('agents')
-        .upsert(agents.map(a => ({ name: a.name, password: a.password })), { onConflict: 'name' });
-      if (upsertError) throw upsertError;
-    } else {
-      const { error } = await supabase.from('agents').delete().neq('name', '');
-      if (error) throw error;
-    }
+// DELETE /agents/:name — Supprimer un agent (admin seulement)
+router.delete('/agents/:name', authenticateToken, requireAdmin, async (req, res) => {
+  const name = decodeURIComponent(req.params.name);
+  try {
+    const { error } = await supabase.from('agents').delete().eq('name', name);
+    if (error) throw error;
     return res.json({ success: true });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
 });
 
-// ─── GET /notes ───────────────────────────────────────────────────────────────
-router.get('/notes', async (req, res) => {
-  if (!supabase) return res.json({ refs: {}, agents: {} });
+// GET /admins — Liste des admins (admin seulement, sans mots de passe)
+router.get('/admins', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('admins').select('name').order('name');
+    if (error) throw error;
+    return res.json((data || []).map(a => ({ name: a.name, password: '********' })));
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /admins — Créer un admin (admin seulement)
+router.post('/admins', authenticateToken, requireAdmin, async (req, res) => {
+  const name = sanitizeText(req.body?.name, 80);
+  const password = typeof req.body?.password === 'string' ? req.body.password.slice(0, 128) : null;
+
+  if (!name || !password) {
+    return res.status(400).json({ error: 'Nom et mot de passe requis' });
+  }
+
+  try {
+    const hashed = bcrypt.hashSync(password, 12);
+    const { error } = await supabase
+      .from('admins')
+      .upsert({ name, password: hashed }, { onConflict: 'name' });
+    if (error) throw error;
+    return res.status(201).json({ success: true, name });
+  } catch (err) {
+    console.error('[POST /admins]', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /admins/:name — Supprimer un admin (admin seulement)
+router.delete('/admins/:name', authenticateToken, requireAdmin, async (req, res) => {
+  const name = decodeURIComponent(req.params.name);
+  // Sécurité : empêcher un admin de se supprimer lui-même
+  if (name === req.user.name) {
+    return res.status(400).json({ error: 'Vous ne pouvez pas supprimer votre propre compte' });
+  }
+  try {
+    const { error } = await supabase.from('admins').delete().eq('name', name);
+    if (error) throw error;
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /notes — Notes internes (admin seulement)
+router.get('/notes', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { data, error } = await supabase.from('notes').select('id, data');
     if (error) throw error;
@@ -208,16 +464,16 @@ router.get('/notes', async (req, res) => {
   }
 });
 
-// ─── POST /notes ──────────────────────────────────────────────────────────────
-router.post('/notes', async (req, res) => {
-  const notes = req.body;
-  if (!supabase) return res.status(500).json({ error: "Base de données non connectée" });
+// POST /notes — Sauvegarder les notes (admin seulement)
+router.post('/notes', authenticateToken, requireAdmin, async (req, res) => {
+  const refs = req.body?.refs || {};
+  const agents = req.body?.agents || {};
 
   try {
-    const { error } = await supabase.from('notes').upsert([
-      { id: 'refs', data: notes.refs || {} },
-      { id: 'agents', data: notes.agents || {} }
-    ], { onConflict: 'id' });
+    const { error } = await supabase.from('notes').upsert(
+      [{ id: 'refs', data: refs }, { id: 'agents', data: agents }],
+      { onConflict: 'id' }
+    );
     if (error) throw error;
     return res.json({ success: true });
   } catch (err) {
@@ -225,27 +481,28 @@ router.post('/notes', async (req, res) => {
   }
 });
 
-// ─── GET /settings ────────────────────────────────────────────────────────────
-router.get('/settings', async (req, res) => {
-  if (!supabase) return res.json({ threshold: 3 });
+// GET /settings — Paramètres (authentifié)
+router.get('/settings', authenticateToken, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('settings')
       .select('value')
       .eq('key', 'threshold')
-      .single();
+      .maybeSingle();
 
-    if (error || !data) return res.json({ threshold: 3 });
-    return res.json({ threshold: parseInt(data.value) || 3 });
+    if (error) throw error;
+    return res.json({ threshold: data ? (parseInt(data.value) || 3) : 3 });
   } catch (err) {
     return res.json({ threshold: 3 });
   }
 });
 
-// ─── POST /settings ───────────────────────────────────────────────────────────
-router.post('/settings', async (req, res) => {
-  const { threshold } = req.body;
-  if (!supabase) return res.status(500).json({ error: "Base de données non connectée" });
+// POST /settings — Modifier paramètres (admin seulement)
+router.post('/settings', authenticateToken, requireAdmin, async (req, res) => {
+  let threshold = parseInt(req.body?.threshold);
+  if (isNaN(threshold) || threshold < 2 || threshold > 20) {
+    return res.status(400).json({ error: 'threshold doit être entre 2 et 20' });
+  }
 
   try {
     const { error } = await supabase
@@ -258,13 +515,32 @@ router.post('/settings', async (req, res) => {
   }
 });
 
-// Monter le routeur sur /api et /
+// ─── 404 catch-all ────────────────────────────────────────────────────────────
+router.use((req, res) => {
+  res.status(404).json({ error: `Route introuvable : ${req.method} ${req.path}` });
+});
+
+// ─── Global error handler ─────────────────────────────────────────────────────
+app.use((err, req, res, _next) => {
+  console.error('[Unhandled Error]', err.message);
+  res.status(500).json({ error: 'Erreur interne du serveur' });
+});
+
+// ─── Mount router ─────────────────────────────────────────────────────────────
+// Toutes les routes sont sous /api (Vercel et Netlify proxy)
 app.use('/api', router);
+
+// Compatibilité Vercel (les rewrites mappent / → /api)
 app.use('/', router);
 
+// ─── Export pour Vercel (serverless) ─────────────────────────────────────────
 module.exports = app;
 
+// ─── Dev server local ─────────────────────────────────────────────────────────
 if (require.main === module) {
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => console.log(`Serveur Express (Supabase JS) démarré sur http://localhost:${PORT}`));
+  app.listen(PORT, () => {
+    console.log(`\n🚀 Serveur démarré sur http://localhost:${PORT}`);
+    console.log(`   ENV : ${NODE_ENV}`);
+    console.log(`   DB  : ${SUPABASE_URL}\n`);
+  });
 }
