@@ -714,6 +714,49 @@ router.post('/user/change-password', authenticateToken, async (req, res) => {
   }
 });
 
+// GET /notes — Récupérer toutes les notes (admins seulement)
+router.get('/notes', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('settings')
+      .select('value')
+      .eq('key', 'notes')
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!data || !data.value) {
+      return res.json({ refs: {}, agents: {} });
+    }
+    const notes = JSON.parse(data.value);
+    return res.json({ refs: notes.refs || {}, agents: notes.agents || {} });
+  } catch (err) {
+    return res.json({ refs: {}, agents: {} });
+  }
+});
+
+// POST /notes — Sauvegarder les notes (admins seulement)
+router.post('/notes', authenticateToken, requireAdmin, async (req, res) => {
+  const notes = req.body;
+  if (!notes || typeof notes !== 'object') {
+    return res.status(400).json({ error: 'Corps de requête invalide' });
+  }
+
+  const payload = {
+    refs: notes.refs || {},
+    agents: notes.agents || {}
+  };
+
+  try {
+    const { error } = await supabase
+      .from('settings')
+      .upsert({ key: 'notes', value: JSON.stringify(payload) }, { onConflict: 'key' });
+    if (error) throw error;
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── 404 catch-all ────────────────────────────────────────────────────────────
 router.use((req, res) => {
   res.status(404).json({ error: `Route introuvable : ${req.method} ${req.path}` });
