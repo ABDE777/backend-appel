@@ -41,8 +41,12 @@ const allowedOrigins = [
   'https://appel-wafa.netlify.app',
   'http://localhost:3000',          // Local development
   'http://localhost:5000',
+  'http://localhost:8080',
+  'http://localhost:8081',         // Local frontend port
+  'http://localhost:58890',         // Alternative local port
+  'http://localhost:59445',         // Alternative local port
   'https://registreappelwafa.netlify.app',
-  'https://backend-appel.vercel.app',  // Alternative local port
+  'https://backend-appel.vercel.app',
   process.env.FRONTEND_URL           // Environment-based flexibility
 ].filter(Boolean);
 
@@ -396,6 +400,115 @@ router.post('/entries/batch', authenticateToken, requireAdmin, async (req, res) 
     return res.json({ success: true, count: rows.length });
   } catch (err) {
     console.error('[POST /entries/batch]', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /entries/archive — Archiver les anciennes entrées (admin seulement + PIN)
+router.post('/entries/archive', authenticateToken, requireAdmin, verifyPin, async (req, res) => {
+  const { daysOld = 365 } = req.body;
+  const cutoffDate = new Date();
+  cutoffDate.setDate(cutoffDate.getDate() - daysOld);
+  const cutoffDateStr = cutoffDate.toISOString().split('T')[0];
+
+  try {
+    // Get entries to archive
+    const { data: entriesToArchive, error: fetchError } = await supabase
+      .from('entries')
+      .select('*')
+      .lt('date', cutoffDateStr);
+
+    if (fetchError) throw fetchError;
+
+    if (!entriesToArchive || entriesToArchive.length === 0) {
+      return res.json({ success: true, archived: 0, message: 'Aucune entrée à archiver' });
+    }
+
+    // Insert into archived_entries table (create if doesn't exist)
+    const { error: archiveError } = await supabase
+      .from('archived_entries')
+      .insert(entriesToArchive);
+
+    if (archiveError) {
+      // If table doesn't exist, create it
+      if (archiveError.code === '42P01') {
+        const { error: createError } = await supabase.rpc('create_archived_entries_table');
+        if (createError) throw createError;
+        // Retry insert
+        const { error: retryError } = await supabase
+          .from('archived_entries')
+          .insert(entriesToArchive);
+        if (retryError) throw retryError;
+      } else {
+        throw archiveError;
+      }
+    }
+
+    // Delete from entries table
+    const { error: deleteError } = await supabase
+      .from('entries')
+      .lt('date', cutoffDateStr)
+      .delete();
+
+    if (deleteError) throw deleteError;
+
+    return res.json({ 
+      success: true, 
+      archived: entriesToArchive.length,
+      message: `${entriesToArchive.length} entrée(s) archivée(s) avant le ${cutoffDateStr}`
+    });
+  } catch (err) {
+    console.error('[POST /entries/archive]', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /entries/anonymize — Anonymiser les données sensibles (admin seulement + PIN)
+router.post('/entries/anonymize', authenticateToken, requireAdmin, verifyPin, async (req, res) => {
+  const { daysOld = 90, fields = ['ref', 'comment'] } = req.body;
+  const cutoffDate = new Date();
+  cutoffDate.setDate(cutoffDate.getDate() - daysOld);
+  const cutoffDateStr = cutoffDate.toISOString().split('T')[0];
+
+  try {
+    // Get entries to anonymize
+    const { data: entriesToAnonymize, error: fetchError } = await supabase
+      .from('entries')
+      .select('id, ref, comment')
+      .lt('date', cutoffDateStr);
+
+    if (fetchError) throw fetchError;
+
+    if (!entriesToAnonymize || entriesToAnonymize.length === 0) {
+      return res.json({ success: true, anonymized: 0, message: 'Aucune entrée à anonymiser' });
+    }
+
+    // Prepare updates
+    const updates = entriesToAnonymize.map(entry => {
+      const updateData = { id: entry.id };
+      if (fields.includes('ref') && entry.ref) {
+        updateData.ref = 'ANONYMIZED-' + entry.id;
+      }
+      if (fields.includes('comment') && entry.comment) {
+        updateData.comment = '[ANONYMIZED]';
+      }
+      return updateData;
+    });
+
+    // Update entries
+    const { error: updateError } = await supabase
+      .from('entries')
+      .upsert(updates);
+
+    if (updateError) throw updateError;
+
+    return res.json({ 
+      success: true, 
+      anonymized: updates.length,
+      message: `${updates.length} entrée(s) anonymisée(s) avant le ${cutoffDateStr}`
+    });
+  } catch (err) {
+    console.error('[POST /entries/anonymize]', err.message);
     return res.status(500).json({ error: err.message });
   }
 });
