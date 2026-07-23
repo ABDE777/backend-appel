@@ -13,6 +13,7 @@ const JWT_SECRET = process.env.JWT_SECRET;
 const ADMIN_PIN = process.env.ADMIN_PIN || '2026'; // PIN pour valider les actions admin CRUD
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const PORT = process.env.PORT || 3000;
+const ADMIN_PIN = '20262026'; // Hardcoded PIN for admin user creation
 
 // Fail fast if critical env vars are missing
 if (!SUPABASE_URL || !SUPABASE_SECRET_KEY) {
@@ -29,7 +30,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
   auth: { persistSession: false, autoRefreshToken: false }
 });
 
-// ─── App setup ────────────────────────────────────────────────────────────────
+// ─── App setup ─────────────────────────────────────────────────────────────
 const app = express();
 
 //CORS
@@ -90,7 +91,7 @@ setInterval(() => {
   }
 }, 60_000);
 
-// ─── Security headers ─────────────────────────────────────────────────────────
+// ─── Security headers ───────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
@@ -103,7 +104,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ─── JWT helpers ──────────────────────────────────────────────────────────────
+// ─── JWT helpers ────────────────────────────────────────────────────────────
 function generateToken(payload) {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: '8h', algorithm: 'HS256' });
 }
@@ -136,13 +137,22 @@ function verifyPin(req, res, next) {
   next();
 }
 
-// ─── Input sanitizers ─────────────────────────────────────────────────────────
+// ─── PIN verification helper ────────────────────────────────────────────────────
+function verifyPin(req, res, next) {
+  const pin = req.body?.pin || req.headers['x-admin-pin'];
+  if (!pin || pin !== ADMIN_PIN) {
+    return res.status(401).json({ error: 'PIN administrateur incorrect' });
+  }
+  next();
+}
+
+// ─── Input sanitizers ───────────────────────────────────────────────────────────
 function sanitizeText(val, maxLen = 100) {
   if (typeof val !== 'string') return null;
   return val.trim().slice(0, maxLen) || null;
 }
 
-// ─── Auth helpers ─────────────────────────────────────────────────────────────
+// ─── Auth helpers ────────────────────────────────────────────────────────────
 async function verifyPassword(plain, stored) {
   if (!plain || !stored) return false;
   // Mot de passe haché bcrypt
@@ -160,7 +170,7 @@ async function upgradePasswordIfNeeded(table, name, plainPassword, storedHash) {
   }
 }
 
-// ─── Router ───────────────────────────────────────────────────────────────────
+// ─── Router ──────────────────────────────────────────────────────────────────
 const router = express.Router();
 
 // GET /status — Health check (public)
@@ -632,9 +642,9 @@ router.post('/settings', authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-// POST /agents/import — Import en masse depuis CSV/Excel (admin seulement)
-// Body: { names: ["alice","bob",...], role: "agent"|"admin" }
-router.post('/agents/import', authenticateToken, requireAdmin, async (req, res) => {
+// POST /agents/import — Import en masse depuis CSV/Excel (admin seulement + PIN)
+// Body: { names: ["alice","bob",...], role: "agent"|"admin", pin: "20262026" }
+router.post('/agents/import', authenticateToken, requireAdmin, verifyPin, async (req, res) => {
   const names = req.body?.names;
   const role = req.body?.role === 'admin' ? 'admin' : 'agent';
   if (!Array.isArray(names) || names.length === 0) {
@@ -710,49 +720,6 @@ router.post('/user/change-password', authenticateToken, async (req, res) => {
   }
 });
 
-// GET /notes — Récupérer toutes les notes (admins seulement)
-router.get('/notes', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from('settings')
-      .select('value')
-      .eq('key', 'notes')
-      .maybeSingle();
-
-    if (error) throw error;
-    if (!data || !data.value) {
-      return res.json({ refs: {}, agents: {} });
-    }
-    const notes = JSON.parse(data.value);
-    return res.json({ refs: notes.refs || {}, agents: notes.agents || {} });
-  } catch (err) {
-    return res.json({ refs: {}, agents: {} });
-  }
-});
-
-// POST /notes — Sauvegarder les notes (admins seulement)
-router.post('/notes', authenticateToken, requireAdmin, async (req, res) => {
-  const notes = req.body;
-  if (!notes || typeof notes !== 'object') {
-    return res.status(400).json({ error: 'Corps de requête invalide' });
-  }
-
-  const payload = {
-    refs: notes.refs || {},
-    agents: notes.agents || {}
-  };
-
-  try {
-    const { error } = await supabase
-      .from('settings')
-      .upsert({ key: 'notes', value: JSON.stringify(payload) }, { onConflict: 'key' });
-    if (error) throw error;
-    return res.json({ success: true });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-
 // ─── 404 catch-all ────────────────────────────────────────────────────────────
 router.use((req, res) => {
   res.status(404).json({ error: `Route introuvable : ${req.method} ${req.path}` });
@@ -764,17 +731,17 @@ app.use((err, req, res, _next) => {
   res.status(500).json({ error: 'Erreur interne du serveur' });
 });
 
-// ─── Mount router ─────────────────────────────────────────────────────────────
+// ─── Mount router ────────────────────────────────────────────────────────────
 // Toutes les routes sont sous /api (Vercel et Netlify proxy)
 app.use('/api', router);
 
 // Compatibilité Vercel (les rewrites mappent / → /api)
 app.use('/', router);
 
-// ─── Export pour Vercel (serverless) ─────────────────────────────────────────
+// ─── Export pour Vercel (serverless) ───────────────────────────────────────
 module.exports = app;
 
-// ─── Dev server local ─────────────────────────────────────────────────────────
+// ─── Dev server local ────────────────────────────────────────────────────────
 if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`\n🚀 Serveur démarré sur http://localhost:${PORT}`);
