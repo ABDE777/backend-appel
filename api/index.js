@@ -31,9 +31,9 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
 // ─── App setup ────────────────────────────────────────────────────────────────
 const app = express();
 
-// CORS — autorise toutes les origines (Netlify, Vercel, localhost)
+// CORS — autorise uniquement le frontend Netlify
 app.use(cors({
-  origin: true,
+  origin: 'https://appel-wafa.netlify.app',
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
