@@ -10,10 +10,9 @@ const { createClient } = require('@supabase/supabase-js');
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 const JWT_SECRET = process.env.JWT_SECRET;
-const ADMIN_PIN = process.env.ADMIN_PIN || '2026'; // PIN pour valider les actions admin CRUD
+const ADMIN_PIN = process.env.ADMIN_PIN; // PIN pour valider les actions admin CRUD (obligatoire dans .env)
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const PORT = process.env.PORT || 3000;
-const ADMIN_PIN = '20262026'; // Hardcoded PIN for admin user creation
 
 // Fail fast if critical env vars are missing
 if (!SUPABASE_URL || !SUPABASE_SECRET_KEY) {
@@ -22,6 +21,10 @@ if (!SUPABASE_URL || !SUPABASE_SECRET_KEY) {
 }
 if (!JWT_SECRET) {
   console.error('[FATAL] JWT_SECRET manquant dans .env');
+  process.exit(1);
+}
+if (!ADMIN_PIN) {
+  console.error('[FATAL] ADMIN_PIN manquant dans .env');
   process.exit(1);
 }
 
@@ -133,15 +136,6 @@ function verifyPin(req, res, next) {
   const pin = req.body?.pin || req.headers['x-admin-pin'];
   if (!pin || pin !== ADMIN_PIN) {
     return res.status(403).json({ error: 'PIN administrateur incorrect' });
-  }
-  next();
-}
-
-// ─── PIN verification helper ────────────────────────────────────────────────────
-function verifyPin(req, res, next) {
-  const pin = req.body?.pin || req.headers['x-admin-pin'];
-  if (!pin || pin !== ADMIN_PIN) {
-    return res.status(401).json({ error: 'PIN administrateur incorrect' });
   }
   next();
 }
