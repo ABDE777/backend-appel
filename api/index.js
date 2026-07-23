@@ -10,6 +10,7 @@ const { createClient } = require('@supabase/supabase-js');
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 const JWT_SECRET = process.env.JWT_SECRET;
+const ADMIN_PIN = process.env.ADMIN_PIN || '2026'; // PIN pour valider les actions admin CRUD
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const PORT = process.env.PORT || 3000;
 
@@ -124,6 +125,15 @@ function authenticateToken(req, res, next) {
 function requireAdmin(req, res, next) {
   if (req.user?.role === 'admin') return next();
   return res.status(403).json({ error: 'Accès réservé aux administrateurs' });
+}
+
+// ─── PIN verification middleware ────────────────────────────────────────────────
+function verifyPin(req, res, next) {
+  const pin = req.body?.pin || req.headers['x-admin-pin'];
+  if (!pin || pin !== ADMIN_PIN) {
+    return res.status(403).json({ error: 'PIN administrateur incorrect' });
+  }
+  next();
 }
 
 // ─── Input sanitizers ─────────────────────────────────────────────────────────
@@ -397,8 +407,8 @@ router.get('/agents', authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-// POST /agents — Créer un agent (admin seulement)
-router.post('/agents', authenticateToken, requireAdmin, async (req, res) => {
+// POST /agents — Créer un agent (admin seulement + PIN)
+router.post('/agents', authenticateToken, requireAdmin, verifyPin, async (req, res) => {
   const name = sanitizeText(req.body?.name, 80);
   const password = typeof req.body?.password === 'string' ? req.body.password.slice(0, 128) : null;
 
@@ -419,8 +429,8 @@ router.post('/agents', authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-// DELETE /agents/:name — Supprimer un agent (admin seulement)
-router.delete('/agents/:name', authenticateToken, requireAdmin, async (req, res) => {
+// DELETE /agents/:name — Supprimer un agent (admin seulement + PIN)
+router.delete('/agents/:name', authenticateToken, requireAdmin, verifyPin, async (req, res) => {
   const name = decodeURIComponent(req.params.name);
   try {
     const { error } = await supabase.from('agents').delete().eq('name', name);
@@ -431,8 +441,8 @@ router.delete('/agents/:name', authenticateToken, requireAdmin, async (req, res)
   }
 });
 
-// PUT /agents/:name — Modifier un agent (mot de passe et/ou nom) (admin seulement)
-router.put('/agents/:name', authenticateToken, requireAdmin, async (req, res) => {
+// PUT /agents/:name — Modifier un agent (mot de passe et/ou nom) (admin seulement + PIN)
+router.put('/agents/:name', authenticateToken, requireAdmin, verifyPin, async (req, res) => {
   const oldName = decodeURIComponent(req.params.name);
   const newName = sanitizeText(req.body?.name, 80) || oldName;
   const password = typeof req.body?.password === 'string' ? req.body.password.slice(0, 128) : null;
@@ -479,8 +489,8 @@ router.get('/admins', authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-// POST /admins — Créer un admin (admin seulement)
-router.post('/admins', authenticateToken, requireAdmin, async (req, res) => {
+// POST /admins — Créer un admin (admin seulement + PIN)
+router.post('/admins', authenticateToken, requireAdmin, verifyPin, async (req, res) => {
   const name = sanitizeText(req.body?.name, 80);
   const password = typeof req.body?.password === 'string' ? req.body.password.slice(0, 128) : null;
 
@@ -501,8 +511,8 @@ router.post('/admins', authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-// DELETE /admins/:name — Supprimer un admin (admin seulement)
-router.delete('/admins/:name', authenticateToken, requireAdmin, async (req, res) => {
+// DELETE /admins/:name — Supprimer un admin (admin seulement + PIN)
+router.delete('/admins/:name', authenticateToken, requireAdmin, verifyPin, async (req, res) => {
   const name = decodeURIComponent(req.params.name);
   // Sécurité : empêcher un admin de se supprimer lui-même
   if (name === req.user.name) {
@@ -517,8 +527,8 @@ router.delete('/admins/:name', authenticateToken, requireAdmin, async (req, res)
   }
 });
 
-// PUT /admins/:name — Modifier un admin (mot de passe et/ou nom) (admin seulement)
-router.put('/admins/:name', authenticateToken, requireAdmin, async (req, res) => {
+// PUT /admins/:name — Modifier un admin (mot de passe et/ou nom) (admin seulement + PIN)
+router.put('/admins/:name', authenticateToken, requireAdmin, verifyPin, async (req, res) => {
   const oldName = decodeURIComponent(req.params.name);
   const newName = sanitizeText(req.body?.name, 80) || oldName;
   const password = typeof req.body?.password === 'string' ? req.body.password.slice(0, 128) : null;
