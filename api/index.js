@@ -31,9 +31,24 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
 // ─── App setup ────────────────────────────────────────────────────────────────
 const app = express();
 
-// CORS — autorise uniquement le frontend Netlify
+//CORS
+const allowedOrigins = [
+  'https://appel-wafa.netlify.app',
+  'http://localhost:3000',          // Local development
+  'http://localhost:5000',
+  'https://registreappelwafa.netlify.app',
+  'https://backend-appel.vercel.app',  // Alternative local port
+  process.env.FRONTEND_URL           // Environment-based flexibility
+].filter(Boolean);
+
 app.use(cors({
-  origin: 'https://appel-wafa.netlify.app',
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
